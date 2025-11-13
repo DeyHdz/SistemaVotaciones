@@ -1,231 +1,195 @@
-// Configuración de Supabase (opcional - ahora funciona sin servidor)
-const projectId = 'TU_PROJECT_ID';
-const publicAnonKey = 'TU_ANON_KEY';
-
-// Estado de la aplicación
-let accessToken = null;
 let user = null;
+let privateKey = null;
 let polls = [];
 
-// Datos de prueba para desarrollo
-const DEMO_MODE = true; // Cambiar a false cuando tengas Supabase configurado
-
-// Inicializar la aplicación
 document.addEventListener('DOMContentLoaded', () => {
     initializeApp();
     setupEventListeners();
 });
 
 function initializeApp() {
-    // Simular carga
     setTimeout(() => {
         checkSession();
     }, 800);
 }
 
 function setupEventListeners() {
-    // Autenticación
     document.getElementById('login-form').addEventListener('submit', handleLogin);
     document.getElementById('signup-form').addEventListener('submit', handleSignup);
     document.getElementById('show-signup').addEventListener('click', showSignupForm);
     document.getElementById('show-login').addEventListener('click', showLoginForm);
     document.getElementById('logout-btn').addEventListener('click', handleLogout);
 
-    // Votaciones
     document.getElementById('create-poll-btn').addEventListener('click', openCreateModal);
     document.getElementById('create-poll-form').addEventListener('submit', handleCreatePoll);
     document.getElementById('add-option-btn').addEventListener('click', addOptionInput);
 
-    // Inicializar opciones del formulario
+    const createModal = document.getElementById('create-modal');
+    createModal.querySelector('.modal-close').addEventListener('click', closeCreateModal);
+    createModal.querySelector('.modal-footer .btn-secondary').addEventListener('click', closeCreateModal);
+    createModal.querySelector('.modal-overlay').addEventListener('click', closeCreateModal);
+
+    document.getElementById('results-modal').addEventListener('click', (e) => {
+        if (e.target.classList.contains('modal-overlay') || e.target.closest('.modal-close')) {
+            closeResultsModal();
+        }
+    });
+
     addOptionInput();
     addOptionInput();
 }
 
 function checkSession() {
-    const storedToken = localStorage.getItem('access_token');
-    const storedUser = localStorage.getItem('user');
+    showAuthForm();
+}
 
-    if (storedToken && storedUser) {
-        accessToken = storedToken;
-        user = JSON.parse(storedUser);
-        showMainApp();
-        fetchPolls();
-    } else {
-        showAuthForm();
+async function handleSignup(e) {
+    e.preventDefault();
+
+    const name = document.getElementById('signup-name').value;
+    const email = document.getElementById('signup-email').value;
+    const password = document.getElementById('signup-password').value;
+
+    try {
+        const keyPair = await forge.pki.rsa.generateKeyPair({ bits: 2048 });
+        const publicKeyPem = forge.pki.publicKeyToPem(keyPair.publicKey);
+        const privateKeyPemEncrypted = forge.pki.encryptRsaPrivateKey(keyPair.privateKey, password);
+
+        const response = await fetch('/registrar', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                username: name,
+                email: email,
+                public_key_pem: publicKeyPem
+            })
+        });
+
+        if (!response.ok) {
+            const err = await response.json();
+            throw new Error(err.error || 'Error al registrar en el servidor.');
+        }
+
+        localStorage.setItem(`private_key_pem_${email}`, privateKeyPemEncrypted);
+        localStorage.setItem(`user_name_${email}`, name);
+        
+        alert('¡Registro exitoso! Por favor, inicia sesión.');
+        showLoginForm(new Event('click'));
+
+    } catch (err) {
+        alert("Error al registrar: " + err.message);
     }
 }
 
 async function handleLogin(e) {
     e.preventDefault();
+
     const email = document.getElementById('login-email').value;
     const password = document.getElementById('login-password').value;
 
-    if (DEMO_MODE) {
-        // Modo demostración - login instantáneo
-        accessToken = 'demo_token_' + Date.now();
-        user = {
-            email: email,
-            user_metadata: { name: email.split('@')[0] }
-        };
-
-        localStorage.setItem('access_token', accessToken);
-        localStorage.setItem('user', JSON.stringify(user));
-
-        showMainApp();
-        fetchPolls();
-        return;
-    }
-
     try {
-        const response = await fetch(
-            `https://${projectId}.supabase.co/functions/v1/make-server-f8ad8275/login`,
-            {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${publicAnonKey}`,
-                },
-                body: JSON.stringify({ email, password }),
-            }
-        );
+        const encryptedPem = localStorage.getItem(`private_key_pem_${email}`);
+        if (!encryptedPem) throw new Error("Usuario no encontrado.");
 
-        const data = await response.json();
-
-        if (!response.ok) {
-            throw new Error(data.error || 'Error al iniciar sesión');
+        let decryptedKey;
+        try {
+            decryptedKey = forge.pki.decryptRsaPrivateKey(encryptedPem, password);
+        } catch {
+            throw new Error("Contraseña incorrecta.");
         }
 
-        accessToken = data.access_token;
-        user = data.user;
+        if (!decryptedKey) throw new Error("Contraseña incorrecta.");
 
-        localStorage.setItem('access_token', accessToken);
-        localStorage.setItem('user', JSON.stringify(user));
+        privateKey = decryptedKey;
+        user = {
+            name: localStorage.getItem(`user_name_${email}`) || email.split('@')[0],
+            email: email
+        };
 
         showMainApp();
         fetchPolls();
-    } catch (error) {
-        alert(error.message);
+
+    } catch (err) {
+        alert("Error al iniciar sesión: " + err.message);
     }
 }
 
-async function handleSignup(e) {
+async function handleCreatePoll(e) {
     e.preventDefault();
-    const name = document.getElementById('signup-name').value;
-    const email = document.getElementById('signup-email').value;
-    const password = document.getElementById('signup-password').value;
 
-    if (DEMO_MODE) {
-        // Modo demostración - registro instantáneo
-        accessToken = 'demo_token_' + Date.now();
-        user = {
-            email: email,
-            user_metadata: { name: name }
-        };
-
-        localStorage.setItem('access_token', accessToken);
-        localStorage.setItem('user', JSON.stringify(user));
-
-        showMainApp();
-        fetchPolls();
+    if (!privateKey || !user) {
+        alert("Error: Sesión no válida.");
+        handleLogout();
         return;
     }
 
-    try {
-        const response = await fetch(
-            `https://${projectId}.supabase.co/functions/v1/make-server-f8ad8275/signup`,
-            {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${publicAnonKey}`,
-                },
-                body: JSON.stringify({ email, password, name }),
-            }
-        );
+    const title = document.getElementById('poll-title').value;
+    const optionInputs = document.querySelectorAll('#options-container .option-input');
+    const options = Array.from(optionInputs)
+        .map(input => input.value.trim())
+        .filter(value => value !== '');
 
-        const data = await response.json();
+    if (options.length < 2) {
+        alert("Debes agregar al menos 2 opciones");
+        return;
+    }
+
+    const pollData = {
+        pregunta: title,
+        opciones: options,
+        id_encuesta: `enc-${Date.now()}`
+    };
+
+    const pollDataBytes = JSON.stringify(pollData, Object.keys(pollData).sort());
+
+    try {
+        const md = forge.md.sha256.create();
+        md.update(pollDataBytes, 'utf8');
+
+        const signatureBytes = privateKey.sign(md);
+        const signatureBase64 = forge.util.encode64(signatureBytes);
+
+        const response = await fetch('/publicar-encuesta', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                username: user.email, 
+                poll_data_json: pollDataBytes,
+                signature_base64: signatureBase64
+            })
+        });
 
         if (!response.ok) {
-            throw new Error(data.error || 'Error al crear cuenta');
+            const errorData = await response.json();
+            throw new Error(errorData.error || 'Error en el servidor.');
         }
 
-        // Auto login después del registro
-        document.getElementById('login-email').value = email;
-        document.getElementById('login-password').value = password;
-        showLoginForm(new Event('click'));
-        await handleLogin(e);
-    } catch (error) {
-        alert(error.message);
+        alert('¡Encuesta creada!');
+        closeCreateModal();
+        fetchPolls();
+
+    } catch (err) {
+        alert("Error al crear encuesta: " + err.message);
     }
 }
 
 function handleLogout() {
-    accessToken = null;
+    privateKey = null;
     user = null;
     polls = [];
-    localStorage.removeItem('access_token');
-    localStorage.removeItem('user');
-    localStorage.removeItem('demo_polls'); // Limpiar votaciones de demostración
     showAuthForm();
 }
 
 async function fetchPolls() {
-    if (DEMO_MODE) {
-        // Cargar votaciones de demostración desde localStorage
-        const storedPolls = localStorage.getItem('demo_polls');
-        if (storedPolls) {
-            polls = JSON.parse(storedPolls);
-        } else {
-            // Votaciones de ejemplo iniciales
-            polls = [
-                {
-                    id: 'poll_1',
-                    title: '¿Cuál es tu lenguaje de programación favorito?',
-                    options: [
-                        { text: 'JavaScript', votes: 5 },
-                        { text: 'Python', votes: 8 },
-                        { text: 'Java', votes: 3 },
-                        { text: 'C++', votes: 2 }
-                    ],
-                    hasVoted: false,
-                    userVote: null
-                },
-                {
-                    id: 'poll_2',
-                    title: '¿Prefieres trabajo remoto o presencial?',
-                    options: [
-                        { text: 'Remoto', votes: 12 },
-                        { text: 'Presencial', votes: 4 },
-                        { text: 'Híbrido', votes: 9 }
-                    ],
-                    hasVoted: false,
-                    userVote: null
-                }
-            ];
-        }
-        renderPolls();
-        return;
-    }
-
     try {
-        const response = await fetch(
-            `https://${projectId}.supabase.co/functions/v1/make-server-f8ad8275/get-polls`,
-            {
-                headers: {
-                    'Authorization': `Bearer ${accessToken}`,
-                },
-            }
-        );
-
-        if (!response.ok) {
-            throw new Error('Error al obtener votaciones');
-        }
-
-        const data = await response.json();
-        polls = data.polls;
+        const response = await fetch('/get-polls');
+        if (!response.ok) throw new Error('No se pudieron cargar las encuestas');
+        const pollList = await response.json();
+        polls = pollList;
         renderPolls();
-    } catch (error) {
-        console.error('Error fetching polls:', error);
+    } catch {
+        polls = [];
+        renderPolls();
     }
 }
 
@@ -242,22 +206,16 @@ function renderPolls() {
     emptyState.classList.add('hidden');
     container.innerHTML = polls.map(poll => createPollCard(poll)).join('');
 
-    // Agregar event listeners para votar
     polls.forEach(poll => {
         if (!poll.hasVoted) {
             poll.options.forEach((option, index) => {
                 const btn = document.querySelector(`[data-poll="${poll.id}"][data-option="${index}"]`);
-                if (btn) {
-                    btn.addEventListener('click', () => handleVote(poll.id, index));
-                }
+                if (btn) btn.addEventListener('click', () => handleVote(poll.id, index));
             });
         }
 
-        // Event listener para ver resultados
         const resultsBtn = document.getElementById(`results-${poll.id}`);
-        if (resultsBtn) {
-            resultsBtn.addEventListener('click', () => showResults(poll));
-        }
+        if (resultsBtn) resultsBtn.addEventListener('click', () => showResults(poll));
     });
 }
 
@@ -265,9 +223,10 @@ function createPollCard(poll) {
     const totalVotes = poll.options.reduce((sum, opt) => sum + opt.votes, 0);
 
     const optionsHtml = poll.options.map((option, index) => {
+        const percentage = totalVotes > 0 ? (option.votes / totalVotes * 100).toFixed(1) : 0;
+        const isUserVote = poll.userVote === index;
+
         if (poll.hasVoted) {
-            const percentage = totalVotes > 0 ? (option.votes / totalVotes * 100).toFixed(1) : 0;
-            const isUserVote = poll.userVote === index;
             return `
                 <div class="poll-option voted" style="--percentage: ${percentage}%">
                     <button data-percentage="${percentage}%" disabled style="background: linear-gradient(90deg, ${isUserVote ? '#3b82f6' : '#e5e7eb'} ${percentage}%, #f9fafb ${percentage}%);">
@@ -299,97 +258,76 @@ function createPollCard(poll) {
 }
 
 async function handleVote(pollId, optionIndex) {
-    if (DEMO_MODE) {
-        // Modo demostración - actualizar votación localmente
+    if (!privateKey || !user) {
+        alert("Error de sesión.");
+        return;
+    }
+
+    try {
+        const md = forge.md.sha256.create();
+        md.update(pollId, 'utf8');
+        const signatureBytes = privateKey.sign(md);
+        const signatureBase64 = forge.util.encode64(signatureBytes);
+
+        const tokenResponse = await fetch('/solicitar-token-votacion', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                user_email: user.email,
+                poll_id: pollId,
+                signature_base64: signatureBase64
+            })
+        });
+
+        const tokenData = await tokenResponse.json();
+        if (!tokenResponse.ok) throw new Error(tokenData.error);
+        
+        const tokenVotacion = tokenData.token_votacion;
+
         const poll = polls.find(p => p.id === pollId);
-        if (poll && !poll.hasVoted) {
-            poll.options[optionIndex].votes++;
-            poll.hasVoted = true;
-            poll.userVote = optionIndex;
-            localStorage.setItem('demo_polls', JSON.stringify(polls));
+        if (!poll || !poll.clave_publica_pem) {
+            throw new Error("Clave pública no encontrada.");
+        }
+
+        const publicKey = forge.pki.publicKeyFromPem(poll.clave_publica_pem);
+
+        const votoEnTextoPlano = JSON.stringify({
+            vote: optionIndex,
+            timestamp: Date.now()
+        });
+
+        const votoCifradoBytes = publicKey.encrypt(votoEnTextoPlano, 'RSA-OAEP', {
+            md: forge.md.sha256.create()
+        });
+        const votoCifradoBase64 = forge.util.encode64(votoCifradoBytes);
+
+        const voteResponse = await fetch('/votar', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                poll_id: pollId,
+                voto_cifrado: votoCifradoBase64,
+                token: tokenVotacion
+            })
+        });
+
+        if (!voteResponse.ok) {
+            const errorData = await voteResponse.json();
+            throw new Error(errorData.error);
+        }
+
+        alert('¡Tu voto ha sido enviado!');
+
+        const p = polls.find(p => p.id === pollId);
+        if (p) {
+            p.options[optionIndex].votes++; 
+            p.hasVoted = true;
+            p.userVote = optionIndex;
             renderPolls();
         }
-        return;
-    }
 
-    try {
-        const response = await fetch(
-            `https://${projectId}.supabase.co/functions/v1/make-server-f8ad8275/vote`,
-            {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${accessToken}`,
-                },
-                body: JSON.stringify({ pollId, optionIndex }),
-            }
-        );
-
-        const data = await response.json();
-
-        if (!response.ok) {
-            throw new Error(data.error || 'Error al votar');
-        }
-
-        await fetchPolls();
-    } catch (error) {
-        alert(error.message);
-    }
-}
-
-async function handleCreatePoll(e) {
-    e.preventDefault();
-    
-    const title = document.getElementById('poll-title').value;
-    const optionInputs = document.querySelectorAll('.option-input');
-    const options = Array.from(optionInputs)
-        .map(input => input.value.trim())
-        .filter(value => value !== '');
-
-    if (options.length < 2) {
-        alert('Debes agregar al menos 2 opciones');
-        return;
-    }
-
-    if (DEMO_MODE) {
-        // Modo demostración - crear votación localmente
-        const newPoll = {
-            id: 'poll_' + Date.now(),
-            title: title,
-            options: options.map(text => ({ text, votes: 0 })),
-            hasVoted: false,
-            userVote: null
-        };
-        polls.unshift(newPoll);
-        localStorage.setItem('demo_polls', JSON.stringify(polls));
-        closeCreateModal();
-        renderPolls();
-        return;
-    }
-
-    try {
-        const response = await fetch(
-            `https://${projectId}.supabase.co/functions/v1/make-server-f8ad8275/create-poll`,
-            {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${accessToken}`,
-                },
-                body: JSON.stringify({ title, options }),
-            }
-        );
-
-        const data = await response.json();
-
-        if (!response.ok) {
-            throw new Error(data.error || 'Error al crear votación');
-        }
-
-        closeCreateModal();
-        await fetchPolls();
-    } catch (error) {
-        alert(error.message);
+    } catch (err) {
+        alert("Error al emitir el voto: " + err.message);
     }
 }
 
@@ -434,36 +372,50 @@ function closeCreateModal() {
     addOptionInput();
 }
 
-function showResults(poll) {
+async function showResults(poll) {
     const modal = document.getElementById('results-modal');
     const title = document.getElementById('results-title');
     const content = document.getElementById('results-content');
 
     title.textContent = poll.title;
 
-    const totalVotes = poll.options.reduce((sum, opt) => sum + opt.votes, 0);
-
-    content.innerHTML = poll.options.map((option, index) => {
-        const percentage = totalVotes > 0 ? (option.votes / totalVotes * 100).toFixed(1) : 0;
-        const isUserVote = poll.userVote === index;
-        
-        return `
-            <div class="result-item">
-                <div class="result-label">
-                    <span>${option.text} ${isUserVote ? '✓' : ''}</span>
-                    <span>${percentage}%</span>
-                </div>
-                <div class="result-bar-container">
-                    <div class="result-bar" style="width: ${percentage}%">
-                        ${option.votes} voto${option.votes !== 1 ? 's' : ''}
-                    </div>
-                </div>
-                <div class="result-votes">${option.votes} de ${totalVotes} votos</div>
-            </div>
-        `;
-    }).join('');
-
+    content.innerHTML = '<p>Obteniendo resultados reales del servidor...</p>';
     modal.classList.remove('hidden');
+
+    try {
+        const response = await fetch(`/contar-votos/${poll.id}`);
+        const data = await response.json();
+
+        if (!response.ok) throw new Error(data.error);
+
+        const serverResults = data.results;
+        const totalVotes = data.total_votos;
+
+        content.innerHTML = poll.options.map((option, index) => {
+            const votes = serverResults[index] || 0;
+            const percentage = totalVotes > 0 ? (votes / totalVotes * 100).toFixed(1) : 0;
+
+            const isUserVote = poll.userVote === index;
+
+            return `
+                <div class="result-item">
+                    <div class="result-label">
+                        <span>${option.text} ${isUserVote ? '✓' : ''}</span>
+                        <span>${percentage}%</span>
+                    </div>
+                    <div class="result-bar-container">
+                        <div class="result-bar" style="width: ${percentage}%">
+                            ${votes} voto${votes !== 1 ? 's' : ''}
+                        </div>
+                    </div>
+                    <div class="result-votes">${votes} de ${totalVotes} votos</div>
+                </div>
+            `;
+        }).join('');
+
+    } catch (err) {
+        content.innerHTML = `<p style="color: red;">Error al cargar resultados: ${err.message}</p>`;
+    }
 }
 
 function closeResultsModal() {
@@ -481,7 +433,7 @@ function showMainApp() {
     document.getElementById('auth-form').classList.add('hidden');
     document.getElementById('main-app').classList.remove('hidden');
     
-    const userName = user?.user_metadata?.name || user?.email;
+    const userName = user?.name || user?.email;
     document.getElementById('user-welcome').textContent = `Bienvenido, ${userName}`;
 }
 
@@ -502,11 +454,3 @@ function showLoginForm(e) {
     signupCard.classList.add('hidden');
     loginCard.classList.remove('hidden');
 }
-
-// Cerrar modales al hacer clic en el overlay
-document.addEventListener('click', (e) => {
-    if (e.target.classList.contains('modal-overlay')) {
-        closeCreateModal();
-        closeResultsModal();
-    }
-});
