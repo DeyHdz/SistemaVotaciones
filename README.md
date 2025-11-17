@@ -19,6 +19,7 @@ Sistema completo de votaciones seguras que implementa:
 ## Requisitos Previos
 
 ### Hay que ejecutar en el backend
+
 ```bash
 flask --app backend run`
 ```
