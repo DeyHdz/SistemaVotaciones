@@ -16,8 +16,8 @@ Sistema completo de votaciones seguras que implementa:
 - ✅ **Base de datos PostgreSQL**: Almacenamiento persistente y seguro
 
 ---
-
 ## Requisitos Previos
+
 ### Hay que ejecutar en el backend
 ```bash
 flask --app backend run`
